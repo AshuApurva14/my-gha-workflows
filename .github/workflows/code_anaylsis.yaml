@@ -1,20 +1,19 @@
 name: Code Analysis resuable workflow
 
 on:
- push:
-   branches:
-    - code-analysis-setup
+ workflow_call:
+    secrets:
+       SONAR_TOKEN:
+         required: true
 
+  
 
 jobs:
   code_analysis:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-     
-    env:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     
     steps:
       
@@ -23,7 +22,7 @@ jobs:
 
       - name: Official SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v5.0.0
-        with:
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       
       
