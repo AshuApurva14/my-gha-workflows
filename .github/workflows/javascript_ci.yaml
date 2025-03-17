@@ -5,8 +5,7 @@ on:
     secrets:
        SONAR_TOKEN:
          required: true
-       GITHUB_TOKEN:
-         required: true
+    
 
 
   
