@@ -1,0 +1,70 @@
+name: Code Analysis resuable workflow
+
+on:
+ workflow_call:
+    secrets:
+       SONAR_TOKEN:
+         required: true
+    
+
+
+  
+
+jobs:
+  code_analysis:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        version: ['20.x', '18.x']
+
+    
+    steps:
+      
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4.2.0
+        with:
+          node-version: ${{ matrix.version }}
+
+       # Find npm cache directory
+      - name: Get npm cache directory
+        id: npm-cache-dir
+        shell: bash
+        run: echo "dir=$(npm config get cache)" >> ${GITHUB_OUTPUT}
+
+      # Cache dependencies
+      - name: Cache dependencies 
+        uses: actions/cache@v4
+        id: npm-cache # use this to check for `cache-hit` ==> if: steps.npm-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.npm-cache-dir.outputs.dir }}
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+
+      - name: Official SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+
+      - name: Install dependencies and Build the code
+        run: |
+           echo "Install all required dependencies"
+           echo "<---------------------- BUILD --------------------------------->"
+           npm install ci-test
+           echo "Successfully Installed all dependencies"
+           echo "Build the code using npm build"
+           echo "<------------------------ INSTALL ------------------------------>"
+           npm run build --if-present
+           echo "Successfully Build the code"
+
+
+           
+      
