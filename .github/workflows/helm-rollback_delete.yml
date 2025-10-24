@@ -1,0 +1,272 @@
+name: Helm Operations - Rollback & Delete
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Operation to perform'
+        required: true
+        type: choice
+        options:
+          - rollback
+          - delete
+      environment:
+        description: 'Target Environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      revision:
+        description: 'Revision number to rollback to (leave empty for previous version)'
+        required: false
+        type: string
+        default: '0'
+      confirm_delete:
+        description: 'Type DELETE to confirm deletion (required for delete operation)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  validate-inputs:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.validate.outputs.proceed }}
+    
+    steps:
+      - name: Validate Delete Confirmation
+        id: validate
+        run: |
+          if [[ "${{ inputs.operation }}" == "delete" ]]; then
+            if [[ "${{ inputs.confirm_delete }}" != "DELETE" ]]; then
+              echo " Delete operation requires typing 'DELETE' in the confirmation field"
+              exit 1
+            fi
+            
+            if [[ "${{ inputs.environment }}" == "production" ]]; then
+              echo "  WARNING: You are about to DELETE the PRODUCTION deployment!"
+              echo "This action is IRREVERSIBLE and will cause downtime."
+            fi
+          fi
+          
+          echo "proceed=true" >> $GITHUB_OUTPUT
+          echo " Validation passed"
+
+  helm-rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: inputs.operation == 'rollback'
+    environment:
+      name: ${{ inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.12.0'
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ inputs.environment == 'dev' && secrets.KUBE_CONFIG_DEV || inputs.environment == 'staging' && secrets.KUBE_CONFIG_STAGING || secrets.KUBE_CONFIG_PROD }}
+
+      - name: Get Current Release Info
+        run: |
+          echo " Current Helm Release Status:"
+          helm list -n ${{ inputs.environment }} | grep ${{ github.event.repository.name }} || echo "No release found"
+          
+          echo ""
+          echo " Release History:"
+          helm history ${{ github.event.repository.name }} -n ${{ inputs.environment }} --max 10 || echo "No history found"
+
+      - name: Perform Rollback
+        run: |
+          RELEASE_NAME="${{ github.event.repository.name }}"
+          NAMESPACE="${{ inputs.environment }}"
+          REVISION="${{ inputs.revision }}"
+          
+          echo "Starting rollback operation..."
+          echo "Release: ${RELEASE_NAME}"
+          echo "Namespace: ${NAMESPACE}"
+          
+          if [[ "${REVISION}" == "0" || -z "${REVISION}" ]]; then
+            echo "Rolling back to previous version..."
+            helm rollback ${RELEASE_NAME} -n ${NAMESPACE} --wait --timeout 5m
+          else
+            echo "Rolling back to revision: ${REVISION}"
+            helm rollback ${RELEASE_NAME} ${REVISION} -n ${NAMESPACE} --wait --timeout 5m
+          fi
+          
+          echo " Rollback completed successfully"
+
+      - name: Verify Rollback
+        run: |
+          echo " Verifying rollback..."
+          
+          kubectl rollout status deployment/${{ github.event.repository.name }} -n ${{ inputs.environment }} --timeout=5m
+          
+          echo ""
+          echo " Current Pod Status:"
+          kubectl get pods -n ${{ inputs.environment }} -l app=${{ github.event.repository.name }}
+          
+          echo ""
+          echo " Updated Release Info:"
+          helm list -n ${{ inputs.environment }} | grep ${{ github.event.repository.name }}
+
+      - name: Run Health Check
+        run: |
+          echo " Running health checks..."
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=ready pod \
+            -l app=${{ github.event.repository.name }} \
+            -n ${{ inputs.environment }} \
+            --timeout=300s
+          
+          # Get pod details
+          POD_NAME=$(kubectl get pods -n ${{ inputs.environment }} -l app=${{ github.event.repository.name }} -o jsonpath='{.items[0].metadata.name}')
+          
+          echo " Health check passed for pod: ${POD_NAME}"
+
+      - name: Notify Rollback Success
+        if: success()
+        run: |
+          echo " Rollback successful for ${{ inputs.environment }} environment"
+          echo "Release: ${{ github.event.repository.name }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      - name: Notify Rollback Failure
+        if: failure()
+        run: |
+          echo "❌ Rollback failed for ${{ inputs.environment }} environment"
+          echo "Please check the logs and manual intervention may be required"
+
+  helm-delete:
+    name: Delete Deployment
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: inputs.operation == 'delete'
+    environment:
+      name: ${{ inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.12.0'
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ inputs.environment == 'dev' && secrets.KUBE_CONFIG_DEV || inputs.environment == 'staging' && secrets.KUBE_CONFIG_STAGING || secrets.KUBE_CONFIG_PROD }}
+
+      - name: Get Release Info Before Delete
+        run: |
+          echo " Current Release Information:"
+          helm list -n ${{ inputs.environment }} | grep ${{ github.event.repository.name }} || echo "No release found"
+          
+          echo ""
+          echo " Resources to be deleted:"
+          kubectl get all -n ${{ inputs.environment }} -l app=${{ github.event.repository.name }}
+
+      - name: Backup Release Values
+        run: |
+          echo " Backing up release values..."
+          helm get values ${{ github.event.repository.name }} -n ${{ inputs.environment }} > /tmp/values-backup.yaml || true
+          
+          if [[ -f /tmp/values-backup.yaml ]]; then
+            echo "Values backed up:"
+            cat /tmp/values-backup.yaml
+          fi
+
+      - name: Delete Helm Release
+        run: |
+          RELEASE_NAME="${{ github.event.repository.name }}"
+          NAMESPACE="${{ inputs.environment }}"
+          
+          echo " Deleting Helm release..."
+          echo "Release: ${RELEASE_NAME}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "  This action is IRREVERSIBLE"
+          
+          helm uninstall ${RELEASE_NAME} -n ${NAMESPACE} --wait --timeout 5m
+          
+          echo " Helm release deleted successfully"
+
+      - name: Verify Deletion
+        run: |
+          echo " Verifying deletion..."
+          
+          # Check if release still exists
+          if helm list -n ${{ inputs.environment }} | grep -q ${{ github.event.repository.name }}; then
+            echo " Release still exists!"
+            exit 1
+          fi
+          
+          echo " Release successfully removed from Helm"
+          
+          # Check for remaining resources
+          echo ""
+          echo " Checking for remaining resources..."
+          REMAINING=$(kubectl get all -n ${{ inputs.environment }} -l app=${{ github.event.repository.name }} 2>/dev/null | wc -l)
+          
+          if [[ ${REMAINING} -gt 0 ]]; then
+            echo " Some resources may still exist:"
+            kubectl get all -n ${{ inputs.environment }} -l app=${{ github.event.repository.name }}
+          else
+            echo " All resources cleaned up"
+          fi
+
+      - name: Notify Deletion Success
+        if: success()
+        run: |
+          echo " Deletion successful for ${{ inputs.environment }} environment"
+          echo "Release: ${{ github.event.repository.name }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+
+      - name: Notify Deletion Failure
+        if: failure()
+        run: |
+          echo " Deletion failed for ${{ inputs.environment }} environment"
+          echo "Manual intervention may be required"
+          echo "Please check the namespace for remaining resources"
+
+  post-operation-summary:
+    name: Operation Summary
+    runs-on: ubuntu-latest
+    needs: [helm-rollback, helm-delete]
+    if: always()
+    
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Helm Operation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Operation:** ${{ inputs.operation }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ inputs.operation }}" == "rollback" ]]; then
+            echo "**Revision:** ${{ inputs.revision || 'Previous version' }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.helm-rollback.result }}" == "success" || "${{ needs.helm-delete.result }}" == "success" ]]; then
+            echo "**Status:**  Success" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:**  Failed" >> $GITHUB_STEP_SUMMARY
+          fi
