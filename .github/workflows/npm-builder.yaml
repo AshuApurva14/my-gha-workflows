@@ -1,0 +1,218 @@
+name: Proto building for npm project in 
+
+on:
+  workflow_call:
+    inputs:
+      branch_build:
+        description: 'Branch build'
+        required: true
+        type: boolean
+      node_version:
+        description: 'Node version'
+        required: true
+        type: string
+      destination_docker_registry:
+        description: 'Destination Docker Registry'
+        required: true
+        type: string
+      baseimage_docker_registry:
+        description: 'Baseimage Docker Registry'
+        required: true
+        type: string
+      helm_registry:
+        description: 'Helm Registry'
+        required: true
+        type: string
+      project_name:
+        description: 'Project name'
+        required: true
+        type: string
+      deployment_name:
+        description: 'Deployment name'
+        required: true
+        type: string
+      protocol_version:
+        description: 'Protocol version'
+        required: true
+        type: string
+      namespace_template:
+        description: 'Namespace template'
+        required: true
+        type: string
+      app_name:
+        description: 'App name'
+        required: true
+        type: string
+      run_unit:
+        description: "Should we run 'unit' target"
+        type: boolean
+        required: false
+        default: false
+      run_test:
+        description: "Should we run 'test' target"
+        type: boolean
+        required: false
+        default: false
+      run_build:
+        description: "Should we run 'build' target"
+        type: boolean
+        required: false
+        default: false
+      run_build_preprod:
+        description: "Should we run 'build-preprod' target"
+        type: boolean
+        required: false
+        default: false
+      run_build_prod:
+        description: "Should we run 'build-prod' target"
+        type: boolean
+        required: false
+        default: false
+      npm_repository:
+        description: 'The name of the npm repository to use'
+        type: string
+        required: true
+      JF_PROJECT:
+        description: 'The JFrog project to use'
+        required: true
+        type: string
+      k8s_namespaces:
+        description: 'Kubernetes namespaces for helm diff (JSON array format)'
+        required: false
+        type: string
+        default: '["dev", "uat", "ro-preprod", "ro-prod"]'
+
+jobs:
+  build_job:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: NPM compile
+      uses: ./actions/npm-build@main
+      with:
+        JF_PROJECT: ${{ inputs.jf_project }}
+        node-version: ${{ inputs.node_version }}
+        npm-repository: ${{ inputs.npm_repository }}
+        NPM_TOKEN: ${{ secrets.REGISTRY_PASSWORD }}
+        NPM_EMAIL: ${{ secrets.REGISTRY_USERNAME }}@gmail.com
+        OPENSSL_CONF: /dev/null
+        RUN_UNIT: ${{ inputs.run_unit }}
+        RUN_TEST: ${{ inputs.run_test }}
+        RUN_BUILD: ${{ inputs.run_build }}
+        RUN_BUILD_PREPROD: ${{ inputs.run_build_preprod }}
+        RUN_BUILD_PROD: ${{ inputs.run_build_prod }}
+
+    - name: Docker authentification common
+      uses: docker/login-action@v3
+      with:
+        registry: '${{ inputs.destination_docker_registry }}'
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+    - name: Docker authentification sharedlib
+      uses: docker/login-action@v3
+      with:
+        registry: '${{ inputs.baseimage_docker_registry }}'
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+    - name: Get semantic version
+      if: ${{ inputs.branch_build == false }}
+      id: version
+      uses: ./actions/semantic-version@v1
+    - name: Get Hash Version
+      if: ${{ inputs.branch_build == true }}
+      id: hash_version
+      run: |
+        echo "version=v0.0.0-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        tags: ${{ inputs.destination_docker_registry }}/${{ inputs.project_name }}:${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+        file: ./dist/docker/Dockerfile
+        context: .
+        push: true
+        labels: |
+          org.opencontainers.image.title=${{ inputs.project_name }}
+          org.opencontainers.image.description=${{ inputs.project_name }}
+          org.opencontainers.image.version=${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+          org.opencontainers.image.source=https://github.com/telia-company/${{ inputs.project_name }}
+    - name: Create the Chart.yaml
+      uses: telia-company/fi-devops-actions/.github/actions/yaml-creator@v1
+      with:
+        templates: ./dist/k8s-helm/Chart.yaml.tpl
+        variables: |
+          appVersion=${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+          version=${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+          name=${{ inputs.project_name }}
+        output: ./dist/k8s-helm/Chart.yaml
+        helm-version: v3.15.3
+    - name: Create the variable file
+      uses: telia-company/fi-devops-actions/.github/actions/helm-var-creator@v1
+      with:
+        template: |
+          appName: ${appname}
+          version: "${protocol_version}"
+          labels:
+            name: ${appname}
+            imageTag: ${version}
+            version: "${protocol_version}"
+          image:
+            name: ${image}:${version}
+        variables: |
+          appname=${{ inputs.app_name }}
+          version=${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+          image=${{ inputs.destination_docker_registry }}/${{ inputs.project_name }}
+          protocol_version=${{ inputs.protocol_version }}
+        output: ./dist/k8s-helm/build-values.yaml
+        helm-version: v3.15.3
+    - name: Package helm chart
+      run: |
+        helm package -d ./dist ./dist/k8s-helm
+    - name: Helm login to ${{ inputs.helm_registry }}
+      run: echo ${{ secrets.REGISTRY_PASSWORD }} | helm registry login ${{ inputs.helm_registry }} --username ${{ secrets.REGISTRY_USERNAME }} --password-stdin
+    - name: Helm push
+      run: |
+        helm push ./dist/*.tgz oci://${{ inputs.helm_registry }}
+    - name: No automated deployments at the moment
+      run: |
+        cat <<EOF >> $GITHUB_STEP_SUMMARY
+        # NO AUTOMATED DEPLOYMENTS AT THE MOMENT
+        Please deploy the helm chart manually to the desired environment from "Manual Deployment" action.
+        ## The tag is ${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}
+        To download the helm chart, run the following command:
+        \`helm pull oci://${{ inputs.helm_registry }}/${{ inputs.project_name }} --version ${{ inputs.branch_build == false &&  steps.version.outputs.version || steps.hash_version.outputs.version }}\`
+        EOF
+  helm_diff:
+    needs: build_job
+    strategy:
+      matrix:
+        k8s-namespace: ${{ fromJSON(inputs.k8s_namespaces) }}
+    runs-on: telia-managed-small
+    environment: ${{ matrix.k8s-namespace }}
+    steps:
+    - name: Clean the ro off from the k8s-namespace
+      id: clean-namespace
+      run: |
+        echo "environment=$( echo "${{ matrix.k8s-namespace }}" | sed 's/^ro-//' )" >> $GITHUB_OUTPUT
+    - uses: ./actions/helmdiff@main
+      with:
+        environment: ${{ github.event.inputs.environment }}
+        build-version: ${{ needs.build_job.outputs.version }}
+        variable-files: |
+          ${{ inputs.project_name }}/${{ steps.clean-namespace.outputs.environment }}.yaml
+          ${{ inputs.project_name }}/build-values.yaml
+        deployment-name: ${{ inputs.deployment_name }}
+        helm-registry: '${{ inputs.helm_registry }}'
+        package-name: ${{ inputs.project_name }}
+        kubernetes-namespace:  ${{ steps.clean-namespace.outputs.environment }}-${{ inputs.namespace_template }}
+        helm-username: ${{ secrets.REGISTRY_USERNAME }}
+        helm-password: ${{ secrets.REGISTRY_PASSWORD }}
+        kubernetes-url: ${{ secrets.K8S_URL }}
+        kubernetes-token: ${{ secrets.K8S_TOKEN }}
