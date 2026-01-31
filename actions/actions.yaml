@@ -55,9 +55,9 @@ runs:
     shell: bash
     run: |
           rm .npmrc
-          npm config set registry 'https://jfrog.teliacompany.io/artifactory/api/npm/${{ inputs.npm-repository }}/'
+          npm config set registry 'https://jfrog.io/artifactory/api/npm/${{ inputs.npm-repository }}/'
           npm config set strict-ssl false # Runners do not have latest CA certs installed
-          npm config set //jfrog.teliacompany.io/artifactory/api/npm/${{ inputs.npm-repository }}/:_authToken ${{ inputs.NPM_TOKEN }}
+          npm config set //jfrog.io/artifactory/api/npm/${{ inputs.npm-repository }}/:_authToken ${{ inputs.NPM_TOKEN }}
           npm ci
 
   - name: Unit test the project
