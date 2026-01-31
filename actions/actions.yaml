@@ -1,0 +1,93 @@
+name: NPM Build
+description: Build a Node.js project using NPM
+
+inputs:
+  JF_PROJECT:
+    description: 'The JFrog project to use'
+    required: true
+  node-version:
+    description: 'The version of Node.js to use'
+    default: '14'
+  npm-repository:
+    description: 'The name of the NPM registry to use'
+    required: true
+  NPM_TOKEN:
+    description: 'The NPM token'
+    required: true
+  NPM_EMAIL:
+    description: 'The NPM email'
+    required: true
+  OPENSSL_CONF:
+    description: 'The OpenSSL configuration for PhantomJS. It does not work with new versions of OpenSSL'
+    default: '/dev/null'
+  RUN_UNIT:
+    description: 'Run the unit tests'
+    default: 'true'
+  RUN_TEST:
+    description: 'Run the tests'
+    default: 'false'
+  RUN_BUILD:
+    description: 'Run the build step'
+    default: 'false'
+  RUN_BUILD_PREPROD:
+    description: 'Run the build-preprod step'
+    default: 'false'
+  RUN_BUILD_PROD:
+    description: 'Run the build-prod step'
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Set up Node.js
+    uses: actions/setup-node@v4
+    with:
+      node-version: ${{ inputs.node-version }}
+      always-auth: true
+      cache: 'npm'
+  - name: Apt Update before installation
+    shell: bash
+    run: sudo apt-get update
+  - name: Install libfontconfig
+    shell: bash
+    run: sudo apt-get install -y libfontconfig libssl-dev
+  - name: Install dependencies
+    shell: bash
+    run: |
+          rm .npmrc
+          npm config set registry 'https://jfrog.teliacompany.io/artifactory/api/npm/${{ inputs.npm-repository }}/'
+          npm config set strict-ssl false # Runners do not have latest CA certs installed
+          npm config set //jfrog.teliacompany.io/artifactory/api/npm/${{ inputs.npm-repository }}/:_authToken ${{ inputs.NPM_TOKEN }}
+          npm ci
+
+  - name: Unit test the project
+    if: ${{ inputs.RUN_UNIT == 'true' }}
+    shell: bash
+    run: npm unit
+
+  - name: Test the project
+    if: ${{ inputs.RUN_TEST == 'true' }}
+    shell: bash
+    run: npm run test
+
+  - name: Build the project
+    if: ${{ inputs.RUN_BUILD == 'true' }}
+    shell: bash
+    run: npm run build
+
+  - name: Build the project (preprod)
+    if: ${{ inputs.RUN_BUILD_PREPROD == 'true' }}
+    shell: bash
+    run: npm run build-preprod
+
+  - name: Build the project (prod)
+    if: ${{ inputs.RUN_BUILD_PROD == 'true' }}
+    shell: bash
+    run: npm run build-prod
+
+  - name: Pack the project
+    shell: bash
+    run: npm pack
+    env:
+      NODE_AUTH_TOKEN:
+        ${{ inputs.NPM_TOKEN }}
